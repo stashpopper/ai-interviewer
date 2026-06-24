@@ -1,136 +1,106 @@
 import express from "express";
-import { PreInterviewBody } from "./types";
+import { PreInterviewBody, EvaluateBody } from "./types";
 import { scrapeGithub } from "./scrapers/github";
 import cors from "cors";
-import { prisma } from "./db";
-import { initSideband } from "./sideband";
 import { calculateResult } from "./result";
 
 const app = express();
 app.use(express.json());
 app.use(cors());
-app.use(express.text({ type: ["application/sdp", "text/plain"] }));
 
-app.post("/api/v1/pre-interview", async (req, res) => { 
-    const { success, data } = PreInterviewBody.safeParse(req.body) ;
+// --- Pre-interview: scrape GitHub and return an interview ID ---
+app.post("/api/v1/pre-interview", async (req, res) => {
+    const { success, data } = PreInterviewBody.safeParse(req.body);
 
     if (!success) {
-        res.status(411).json({
-            message: "Incorrect body"
-        });
-        return 
+        res.status(411).json({ message: "Incorrect body" });
+        return;
     }
 
-    // TODO: URL can be very malformed, probably use an SLM here?
     const githubUrl = data.github.endsWith("/") ? data.github.slice(0, -1) : data.github;
-
     const githubUsername = githubUrl.split("/").pop()!;
-
     const githubData = await scrapeGithub(githubUsername);
 
-    const interview = await prisma.interview.create({
-        data: {
-            githubMetadata: JSON.stringify(githubData),
-            status: "Pre"
-        }
-    })
+    const interviewId = crypto.randomUUID();
 
-    res.json({ id: interview.id });
-})
-
-app.post("/api/v1/session/:interviewId", async (req, res) => {
-    
-    const sessionConfig = JSON.stringify({
-        type: "realtime",
-        model: "gpt-realtime",
-        audio: { output: { voice: "marin" } },
-    });
-
-    const fd = new FormData();
-    fd.set("sdp", req.body);
-    fd.set("session", sessionConfig);
-  
-    try {
-      const sdpResponse = await fetch("https://api.openai.com/v1/realtime/calls", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_KEY}`,
-          "OpenAI-Safety-Identifier": "hashed-user-id",
-        },
-        body: fd,
-      });
-
-      const location = sdpResponse.headers.get("Location");
-      const callId = location?.split("/").pop()!;
-      console.log(callId);
-      // Send back the SDP we received from the OpenAI REST API
-      const sdp = await sdpResponse.text();
-      res.send(sdp);
-
-      initSideband(callId, req.params.interviewId);
-    } catch (error) {
-      console.error("Token generation error:", error);
-      res.status(500).json({ error: "Failed to generate token" });
-    }
-
+    res.json({ id: interviewId });
 });
 
-app.post("/api/v1/session/user/response/:interviewId", async (req, res) => {
-  const { message } = req.body;
-  await prisma.message.create({
-    data: {
-        interviewId: req.params.interviewId!,
-        type: "User",
-        message: message
+// --- Chat: Mistral generates interviewer reply ---
+app.post("/api/v1/chat", async (req, res) => {
+    const { message, transcript } = req.body;
+
+    if (!message) {
+        res.status(411).json({ message: "Missing message" });
+        return;
     }
-  });
 
-  res.json({message: "Message saved"});
-})
+    try {
+        const resp = await fetch("https://api.mistral.ai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${process.env.MISTRAL_API_KEY}`,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                model: process.env.MISTRAL_MODEL || "labs-leanstral-2603",
+                messages: [
+                    {
+                        role: "system",
+                        content: `You are a friendly technical interviewer conducting a voice interview. Follow these rules:
+- Ask 4-6 progressive questions, starting easy and getting harder
+- Base questions on the candidate's background and previous answers
+- Give follow-up questions to dig deeper
+- Keep responses concise (1-2 sentences max) — this is a conversation
+- Be encouraging but honest
+- Use English only
 
-app.get("/api/v1/result/:interviewId", async (req, res) => {
-  const interview = await prisma.interview.findFirst({
-    where: {
-      id: req.params.interviewId
-    },
-    include: {
-      conversations: true
+Current conversation context:
+${JSON.stringify(transcript || [])}`
+                    },
+                    { role: "user", content: message },
+                ],
+                max_tokens: 100,
+            }),
+        });
+
+        const data = await resp.json();
+        const reply = data.choices?.[0]?.message?.content || "Could you elaborate on that?";
+        res.json({ reply });
+    } catch (error) {
+        console.error("Mistral error:", error);
+        res.status(500).json({ reply: "I didn't catch that, could you repeat?" });
     }
-  })
+});
 
-  if (!interview) {
-    res.status(411).json({
-      message: "Interview not found"
-    })
-    return 
-  }
+// --- Evaluate: take transcript, return score + feedback ---
+app.post("/api/v1/evaluate", async (req, res) => {
+    const { success, data } = EvaluateBody.safeParse(req.body);
 
-  res.json({
-    score: interview?.score,
-    feedback: interview?.feedback,
-    transcript: interview?.conversations.map(c => ({
-      type: c.type,
-      content: c.message,
-      createdAt: c.createdAt
-    })),
-    status: interview.status
-  })
+    if (!success) {
+        res.status(411).json({ message: "Incorrect body" });
+        return;
+    }
 
-  // TODO: Should add some sort of a lock here.
-  if (interview.status != "Done") {
-    const result = await calculateResult(interview.conversations)
+    const messages = data.transcript.map(t => ({
+        type: t.type as "User" | "Assistant",
+        message: t.message,
+        createdAt: new Date(),
+    }));
 
-    await prisma.interview.update({
-      where: {
-        id: req.params.interviewId
-      },
-      data: {
-        status: "Done",
-        feedback: result.feedback,
-        score: result.score
-      }
-    })
-  }
-})
+    try {
+        const result = await calculateResult(messages);
+        res.json(result);
+    } catch (error: any) {
+        console.error("Evaluation error:", error.message);
+        // Return a default result if Gemini is down
+        res.json({
+            score: 0,
+            feedback: "Could not evaluate your interview right now due to a service issue. Please try again later."
+        });
+    }
+});
 
-app.listen(3001);
+app.listen(3001, () => {
+    console.log("Backend running on port 3001");
+});
