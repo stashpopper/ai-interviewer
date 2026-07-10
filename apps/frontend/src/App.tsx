@@ -1,4 +1,5 @@
 import "styles/globals.css"
+import { Landing } from "./components/Landing";
 import { Form } from "./components/Form";
 import { Interview } from "./components/Interview";
 import { Result } from "./components/Result";
@@ -9,7 +10,8 @@ export function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<Form />} />
+        <Route path="/" element={<Landing />} />
+        <Route path="/start" element={<Form />} />
         <Route path="/interview/:interviewId" element={<Interview />} />
         <Route path="/result" element={<Result />} />
       </Routes>

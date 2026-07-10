@@ -1,29 +1,56 @@
 import { BACKEND_URL } from "@/lib/config";
 import axios from "axios";
-import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useParams } from "react-router";
 import { Bot, Loader2, PhoneOff, User } from "lucide-react";
 import { Button } from "./ui/button";
 import { VoiceOrb } from "./VoiceOrb";
 
 type Status = "connecting" | "live" | "evaluating";
 
+// Simple linear interpolation resampler
+function resampleSamples(input: Float32Array, ratio: number): Float32Array {
+    const outputLen = Math.floor(input.length * ratio);
+    const output = new Float32Array(outputLen);
+
+    for (let i = 0; i < outputLen; i++) {
+        const srcIndex = i / ratio;
+        const idx = Math.floor(srcIndex);
+        const frac = srcIndex - idx;
+        if (idx + 1 < input.length) {
+            output[i] = input[idx] * (1 - frac) + input[idx + 1] * frac;
+        } else {
+            output[i] = input[idx] || 0;
+        }
+    }
+
+    return output;
+}
+
 export function Interview() {
+    const { interviewId } = useParams();
     const navigate = useNavigate();
     const [status, setStatus] = useState<Status>("connecting");
     const [aiLevel, setAiLevel] = useState(0);
     const [userLevel, setUserLevel] = useState(0);
     const [transcript, setTranscript] = useState<Array<{ type: string; message: string }>>([]);
     const [error, setError] = useState("");
+    const [statusMessage, setStatusMessage] = useState("");
+    const [interimText, setInterimText] = useState("");
 
     const synthRef = useRef<SpeechSynthesis | null>(null);
-    const recognitionRef = useRef<any>(null);
     const userStreamRef = useRef<MediaStream | null>(null);
     const analyserRef = useRef<AnalyserNode | null>(null);
     const rafRef = useRef<number | null>(null);
     const isRespondingRef = useRef(false);
-    const lastProcessedRef = useRef("");
+    const processedUserCountRef = useRef(0);
+    const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const pendingFinalTextRef = useRef("");
     const transcriptRef = useRef<Array<{ type: string; message: string }>>([]);
+    const wsRef = useRef<WebSocket | null>(null);
+    const audioContextRef = useRef<AudioContext | null>(null);
+    const streamRef = useRef<MediaStream | null>(null);
+    const prevUserLevelRef = useRef(0);
 
     useEffect(() => {
         let cancelled = false;
@@ -36,48 +63,135 @@ export function Interview() {
                 const ms = await navigator.mediaDevices.getUserMedia({ audio: true });
                 if (cancelled) { ms.getTracks().forEach((t) => t.stop()); return; }
                 userStreamRef.current = ms;
+                streamRef.current = ms;
 
-                // Audio analyser for level meter
-                const audioCtx = new AudioContext();
-                const source = audioCtx.createMediaStreamSource(ms);
-                const analyser = audioCtx.createAnalyser();
-                analyser.fftSize = 512;
-                analyser.smoothingTimeConstant = 0.8;
-                source.connect(analyser);
-                analyserRef.current = analyser;
+                // Audio pipeline: capture at native rate, resample to 16kHz for Deepgram
+                const nativeAudioCtx = new AudioContext();
+                audioContextRef.current = nativeAudioCtx;
+                const source = nativeAudioCtx.createMediaStreamSource(ms);
 
-                // STT
-                const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-                if (!SpeechRecognition) {
-                    setError("Speech recognition not supported. Use Chrome.");
-                    return;
-                }
+                const bufferSize = 4096;
+                const scriptProcessor = nativeAudioCtx.createScriptProcessor(bufferSize, 1, 1);
+                source.connect(scriptProcessor);
+                scriptProcessor.connect(nativeAudioCtx.destination);
 
-                const recognition = new SpeechRecognition();
-                recognitionRef.current = recognition;
-                recognition.continuous = true;
-                recognition.interimResults = true;
-                recognition.lang = "en-US";
+                let nativeSampleRate = nativeAudioCtx.sampleRate;
+                let targetSampleRate = 16000;
+                let resampleRatio = targetSampleRate / nativeSampleRate;
+                let leftover: Float32Array | null = null;
 
-                recognition.onresult = (event: any) => {
-                    let finalText = "";
-                    for (let i = event.resultIndex; i < event.results.length; i++) {
-                        if (event.results[i].isFinal) {
-                            finalText += event.results[i][0].transcript;
+                scriptProcessor.onaudioprocess = (e) => {
+                    const inputData = e.inputBuffer.getChannelData(0);
+
+                    // Calculate audio level for visualization
+                    let sum = 0;
+                    for (let i = 0; i < inputData.length; i++) {
+                        const v = inputData[i];
+                        sum += v * v;
+                    }
+                    const level = Math.min(1, Math.sqrt(sum / inputData.length) * 4);
+                    if (Math.abs(level - prevUserLevelRef.current) > 0.03) {
+                        setUserLevel(level);
+                        prevUserLevelRef.current = level;
+                    }
+
+                    // Prepend leftover from previous callback
+                    let input: Float32Array;
+                    if (leftover && leftover.length > 0) {
+                        input = new Float32Array(leftover.length + inputData.length);
+                        input.set(leftover);
+                        input.set(inputData, leftover.length);
+                        leftover = null;
+                    } else {
+                        input = inputData;
+                    }
+
+                    // Resample entire input
+                    const resampled = resampleSamples(input, resampleRatio);
+
+                    // Send in ~10ms chunks (160 samples at 16kHz = 320 bytes int16)
+                    const chunkSize = 160;
+                    let i = 0;
+                    for (; i < resampled.length - chunkSize; i += chunkSize) {
+                        const end = i + chunkSize;
+
+                        // Convert float32 to int16 PCM inline
+                        const int16Data = new Int16Array(chunkSize);
+                        for (let j = 0; j < chunkSize; j++) {
+                            const s = resampled[i + j];
+                            int16Data[j] = s < 0 ? Math.floor(s * 0x8000) : Math.floor(s * 0x7FFF);
+                        }
+
+                        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                            wsRef.current.send(int16Data.buffer);
                         }
                     }
-                    if (finalText.trim()) {
-                        const text = finalText.trim();
-                        console.log("STT final:", text);
-                        setTranscript((prev) => [...prev, { type: "User", message: text }]);
+
+                    // Keep leftover samples that don't form a full chunk
+                    if (i < resampled.length) {
+                        leftover = resampled.slice(i);
                     }
                 };
 
-                recognition.onerror = (e: any) => {
-                    if (!cancelled && e.error !== "aborted" && e.error !== "no-speech") {
-                        console.error("STT error:", e.error);
-                        if (e.error === "not-allowed") setError("Mic access denied.");
+                // Connect to backend WebSocket for STT
+                const wsUrl = `${BACKEND_URL.replace("http", "ws")}/ws/stt?interviewId=${interviewId}`;
+                const ws = new WebSocket(wsUrl);
+                wsRef.current = ws;
+
+                ws.onopen = () => {
+                    console.log("[STT] WebSocket connected");
+                };
+
+                ws.onmessage = (event) => {
+                    try {
+                        const msg = JSON.parse(event.data);
+
+                        if (msg.type === "speechStarted") {
+                            console.log("[STT] Speech started");
+                            if (silenceTimerRef.current) {
+                                clearTimeout(silenceTimerRef.current);
+                                silenceTimerRef.current = null;
+                            }
+                        } else if (msg.type === "interim") {
+                            setInterimText(msg.text);
+                            if (silenceTimerRef.current) {
+                                clearTimeout(silenceTimerRef.current);
+                                silenceTimerRef.current = null;
+                            }
+                        } else if (msg.type === "final") {
+                            const text = msg.text.trim();
+                            if (!text) return;
+                            setInterimText(text);
+                            pendingFinalTextRef.current = pendingFinalTextRef.current
+                                ? pendingFinalTextRef.current + " " + text
+                                : text;
+                            if (silenceTimerRef.current) {
+                                clearTimeout(silenceTimerRef.current);
+                            }
+                            silenceTimerRef.current = setTimeout(() => {
+                                const finalText = pendingFinalTextRef.current.trim();
+                                if (!finalText) return;
+                                setInterimText("");
+                                console.log("[STT] Committed text:", finalText);
+                                const entry = { type: "User" as const, message: finalText };
+                                transcriptRef.current = [...transcriptRef.current, entry];
+                                setTranscript((prev) => [...prev, entry]);
+                                pendingFinalTextRef.current = "";
+                                silenceTimerRef.current = null;
+                            }, 7000);
+                        }
+                    } catch (e) {
+                        console.error("[STT] Message parse error:", e);
                     }
+                };
+
+                ws.onerror = (err) => {
+                    console.error("[STT] WebSocket error:", err);
+                    if (!cancelled) setError("Speech recognition connection failed.");
+                };
+
+                ws.onclose = () => {
+                    console.log("[STT] WebSocket closed");
                 };
 
                 // Speak function
@@ -102,7 +216,6 @@ export function Interview() {
 
                     synthRef.current?.speak(utterance);
 
-                    // Wait for speech to finish
                     await new Promise<void>((resolve) => {
                         const check = () => {
                             if (cancelled) { resolve(); return; }
@@ -116,57 +229,34 @@ export function Interview() {
                     });
                 };
 
-                // Level meter loop
-                const data = new Uint8Array(512);
-                const updateLevel = () => {
-                    if (cancelled) return;
-                    analyserRef.current?.getByteTimeDomainData(data);
-                    let sum = 0;
-                    for (let i = 0; i < data.length; i++) {
-                        const v = (data[i]! - 128) / 128;
-                        sum += v * v;
-                    }
-                    const level = Math.min(1, Math.sqrt(sum / data.length) * 3.2);
-                    setUserLevel(level);
-                    rafRef.current = requestAnimationFrame(updateLevel);
-                };
-                rafRef.current = requestAnimationFrame(updateLevel);
-
                 // First question from backend
-                setError("Loading first question...");
+                setStatusMessage("Loading first question...");
                 const firstResp = await axios.post(`${BACKEND_URL}/api/v1/chat`, {
                     message: "Start the interview",
                     transcript: [],
+                    interviewId,
                 });
-                const firstQuestion = firstResp.data.reply;
+                let firstQuestion = firstResp.data.reply;
+                firstQuestion = firstQuestion.replace(/\*/g, "").trim();
 
-                setError("Speaking...");
+                setStatusMessage("Speaking...");
                 await speak(firstQuestion);
                 const firstTranscript = [{ type: "Assistant" as const, message: firstQuestion }];
                 transcriptRef.current = firstTranscript;
                 setTranscript(firstTranscript);
-                setError("");
+                setStatusMessage("");
+                setStatus("live");
 
-                // Start listening
-                if (!cancelled) {
-                    recognition.start();
-                    setStatus("live");
-                }
-
-                // Main loop: wait for user to finish, then get AI response
+                // Main loop: wait for user to finish speaking, then get AI response
                 while (!cancelled) {
-                    // Wait until AI is done AND user has spoken something
                     await new Promise<void>((resolve) => {
                         const check = () => {
                             if (cancelled) { resolve(); return; }
                             if (isRespondingRef.current) {
-                                // AI is speaking, wait
                                 setTimeout(check, 200);
                             } else {
-                                // AI is done — check if user has a new message
-                                const lastUser = transcriptRef.current.filter(m => m.type === "User").pop();
-                                if (lastUser && lastUser.message !== lastProcessedRef.current) {
-                                    lastProcessedRef.current = lastUser.message;
+                                const userMsgs = transcriptRef.current.filter(m => m.type === "User");
+                                if (userMsgs.length > processedUserCountRef.current) {
                                     resolve();
                                 } else {
                                     setTimeout(check, 200);
@@ -176,23 +266,27 @@ export function Interview() {
                         check();
                     });
 
-                    // Get AI response
                     if (!cancelled) {
-                        const lastUserMsg = transcriptRef.current.filter(m => m.type === "User").pop();
-                        if (lastUserMsg) {
+                        const userMsgs = transcriptRef.current.filter(m => m.type === "User");
+                        if (userMsgs.length > processedUserCountRef.current) {
+                            const lastUserMsg = userMsgs[userMsgs.length - 1];
                             try {
-                                setError("Thinking...");
+                                setStatusMessage("Thinking...");
                                 const resp = await axios.post(`${BACKEND_URL}/api/v1/chat`, {
                                     message: lastUserMsg.message,
                                     transcript: transcriptRef.current.slice(-6),
+                                    interviewId,
                                 });
-                                const aiText = resp.data.reply;
+                                let aiText = resp.data.reply;
+                                aiText = aiText.replace(/\*/g, "").trim();
                                 if (aiText && !cancelled) {
-                                    setError("Speaking...");
+                                    setStatusMessage("Speaking...");
                                     await speak(aiText);
-                                    const newTranscript = [...transcriptRef.current, { type: "Assistant", message: aiText }];
+                                    const newTranscript = [...transcriptRef.current, { type: "Assistant" as const, message: aiText }];
                                     transcriptRef.current = newTranscript;
                                     setTranscript(newTranscript);
+                                    processedUserCountRef.current = userMsgs.length;
+                                    setStatusMessage("");
                                 }
                             } catch (e) {
                                 console.error("Chat error:", e);
@@ -209,12 +303,14 @@ export function Interview() {
 
         return () => {
             cancelled = true;
+            if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
             if (rafRef.current) cancelAnimationFrame(rafRef.current);
-            recognitionRef.current?.stop();
+            wsRef.current?.close();
+            if (audioContextRef.current) audioContextRef.current.close();
             synthRef.current?.cancel();
             userStreamRef.current?.getTracks().forEach((t) => t.stop());
         };
-    }, []);
+    }, [interviewId]);
 
     async function endInterview() {
         setStatus("evaluating");
@@ -229,6 +325,13 @@ export function Interview() {
 
     const aiSpeaking = aiLevel > 0.06;
     const userSpeaking = userLevel > 0.06;
+
+    const memoizedTranscript = useMemo(() => {
+        return transcript.map((m, i) => {
+            const isAi = m.type === "Assistant";
+            return { ...m, _key: i, isAi };
+        });
+    }, [transcript]);
 
     return (
         <main className="flex h-screen w-screen flex-col overflow-hidden">
@@ -260,6 +363,11 @@ export function Interview() {
                         <p className="text-sm">{error}</p>
                         <p className="text-xs text-muted-foreground">Check browser console for details</p>
                     </div>
+                ) : statusMessage ? (
+                    <div className="flex flex-col items-center gap-3 text-muted-foreground">
+                        <Loader2 className="size-7 animate-spin" />
+                        <p className="text-sm">{statusMessage}</p>
+                    </div>
                 ) : status === "connecting" ? (
                     <div className="flex flex-col items-center gap-3 text-muted-foreground">
                         <Loader2 className="size-7 animate-spin" />
@@ -269,20 +377,24 @@ export function Interview() {
                     <div className="flex w-full max-w-3xl flex-col items-center gap-8">
                         {/* Conversation */}
                         <div className="flex w-full max-w-2xl flex-col gap-3 overflow-y-auto px-4" style={{ maxHeight: "50vh" }}>
-                            {transcript.map((m, i) => {
-                                const isAi = m.type === "Assistant";
-                                return (
-                                    <div key={i} className={`flex ${isAi ? "justify-start" : "justify-end"}`}>
-                                        <div
-                                            className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
-                                                isAi ? "rounded-tl-sm bg-card text-foreground" : "rounded-tr-sm bg-primary text-primary-foreground"
-                                            }`}
-                                        >
-                                            {m.message}
-                                        </div>
+                            {memoizedTranscript.map((m) => (
+                                <div key={m._key} className={`flex ${m.isAi ? "justify-start" : "justify-end"}`}>
+                                    <div
+                                        className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+                                            m.isAi ? "rounded-tl-sm bg-card text-foreground" : "rounded-tr-sm bg-primary text-primary-foreground"
+                                        }`}
+                                    >
+                                        {m.message}
                                     </div>
-                                );
-                            })}
+                                </div>
+                            ))}
+                            {interimText && (
+                                <div className="flex justify-end">
+                                    <div className="max-w-[80%] rounded-2xl rounded-tr-sm bg-primary/60 px-4 py-2.5 text-sm leading-relaxed text-primary-foreground opacity-70 italic">
+                                        {interimText}
+                                    </div>
+                                </div>
+                            )}
                         </div>
 
                         {/* Orbs */}
