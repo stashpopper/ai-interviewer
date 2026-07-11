@@ -4,31 +4,76 @@ import { scrapeGithub } from "./scrapers/github";
 import cors from "cors";
 import { calculateResult } from "./result";
 import WebSocket from "ws";
+import multer from "multer";
+import { PDFParse } from "pdf-parse";
+import mammoth from "mammoth";
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
-// In-memory store for interview context (github data)
-const interviewContext = new Map<string, { githubUsername: string; githubData: Array<{ description?: string; name: string; fullName: string; starCount?: number }> }>();
+// In-memory store for interview context (github data + resume)
+const interviewContext = new Map<string, { githubUsername?: string; githubData?: Array<{ description?: string; name: string; fullName: string; starCount?: number }>; resumeText?: string }>();
 
-// --- Pre-interview: scrape GitHub and return an interview ID ---
-app.post("/api/v1/pre-interview", async (req, res) => {
-    const { success, data } = PreInterviewBody.safeParse(req.body);
+// Multer config for resume uploads (memory storage)
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
-    if (!success) {
-        res.status(411).json({ message: "Incorrect body" });
+// --- Pre-interview: scrape GitHub and/or parse resume, return an interview ID ---
+app.post("/api/v1/pre-interview", upload.single("resume"), async (req, res) => {
+    // Support both JSON body and multipart form data
+    const github = req.body?.github as string | undefined;
+    const resumeTextBody = req.body?.resumeText as string | undefined;
+    const resumeFile = req.file;
+
+    if (!github && !resumeTextBody && !resumeFile) {
+        res.status(411).json({ message: "Provide at least a GitHub URL or resume" });
         return;
     }
 
-    const githubUrl = data.github.endsWith("/") ? data.github.slice(0, -1) : data.github;
-    const githubUsername = githubUrl.split("/").pop()!;
-    const githubData = await scrapeGithub(githubUsername);
+    let resumeText = resumeTextBody || "";
+
+    // Parse uploaded file if provided
+    if (resumeFile) {
+        try {
+            const mimetype = resumeFile.mimetype.toLowerCase();
+            if (mimetype === "application/pdf") {
+                const parser = new PDFParse({ data: resumeFile.buffer });
+                const result = await parser.getText();
+                resumeText = result.text;
+                await parser.destroy();
+            } else if (
+                mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+                mimetype === "application/msword"
+            ) {
+                const result = await mammoth.extractRawText({ buffer: resumeFile.buffer });
+                resumeText = result.value;
+            } else {
+                res.status(400).json({ message: "Unsupported file type. Please upload PDF or DOCX." });
+                return;
+            }
+        } catch (err) {
+            console.error("Resume parse error:", err);
+            res.status(500).json({ message: "Failed to parse resume file." });
+            return;
+        }
+    }
+
+    // Truncate resume text to avoid token overflow (~8k chars max)
+    if (resumeText.length > 8000) {
+        resumeText = resumeText.slice(0, 8000);
+    }
+
+    let githubUsername: string | undefined;
+    let githubData: Array<{ description?: string; name: string; fullName: string; starCount?: number }> | undefined;
+
+    if (github) {
+        const githubUrl = github.endsWith("/") ? github.slice(0, -1) : github;
+        githubUsername = githubUrl.split("/").pop()!;
+        githubData = await scrapeGithub(githubUsername);
+    }
 
     const interviewId = crypto.randomUUID();
-
-    // Store github data in memory (keyed by interview id)
-    interviewContext.set(interviewId, { githubUsername, githubData });
+    interviewContext.set(interviewId, { githubUsername, githubData, resumeText });
 
     res.json({ id: interviewId });
 });
@@ -45,14 +90,23 @@ app.post("/api/v1/chat", async (req, res) => {
 
     const context = interviewId ? interviewContext.get(interviewId) : null;
 
-    let githubContext = "";
-    if (context && context.githubData.length > 0) {
-        const repos = context.githubData
-            .sort((a, b) => (b.starCount || 0) - (a.starCount || 0))
-            .slice(0, 5)
-            .map(r => `  - ${r.fullName}${r.description ? ` (${r.description})` : ""}`)
-            .join("\n");
-        githubContext = `\nThe candidate's GitHub profile (@${context.githubUsername}) has these top projects:\n${repos}\n\nUse these projects to tailor your questions.`;
+    let backgroundContext = "";
+    if (context) {
+        const parts: string[] = [];
+        if (context.githubData && context.githubData.length > 0) {
+            const repos = context.githubData
+                .sort((a, b) => (b.starCount || 0) - (a.starCount || 0))
+                .slice(0, 5)
+                .map(r => `  - ${r.fullName}${r.description ? ` (${r.description})` : ""}`)
+                .join("\n");
+            parts.push(`GitHub profile (@${context.githubUsername}) top projects:\n${repos}`);
+        }
+        if (context.resumeText) {
+            parts.push(`Candidate's resume:\n${context.resumeText}`);
+        }
+        if (parts.length > 0) {
+            backgroundContext = `\n\nCandidate background:\n${parts.join("\n\n")}\n\nUse this background to tailor your questions.`;
+        }
     }
 
     try {
@@ -78,7 +132,7 @@ app.post("/api/v1/chat", async (req, res) => {
 - Do NOT use any markdown formatting
 - Do NOT say "Got it" or "Nice" as standalone responses — always ask a question or give a follow-up
 
-Candidate background:${githubContext}
+Candidate background:${backgroundContext}
 
 Current conversation context:
 ${JSON.stringify(transcript || [])}`

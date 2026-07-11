@@ -6,7 +6,7 @@ const ai = new GoogleGenAI({apiKey: process.env.GEMINI_API_KEY!});
 
 const outputSchema = z.object({
     feedback: z.string().describe("Feedback for the user"),
-    score: z.number().int().describe("Score out of 10 for their interview"),
+    score: z.number().transform((v) => Math.round(v)).pipe(z.number().int().min(0).max(10)).describe("Score out of 10 for their interview"),
 });
 
 const RESULT_PROMPT = `

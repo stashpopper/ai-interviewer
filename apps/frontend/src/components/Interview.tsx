@@ -46,6 +46,7 @@ export function Interview() {
     const processedUserCountRef = useRef(0);
     const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const pendingFinalTextRef = useRef("");
+    const lastSpeechTimeRef = useRef<number>(0);
     const transcriptRef = useRef<Array<{ type: string; message: string }>>([]);
     const wsRef = useRef<WebSocket | null>(null);
     const audioContextRef = useRef<AudioContext | null>(null);
@@ -146,14 +147,19 @@ export function Interview() {
                     try {
                         const msg = JSON.parse(event.data);
 
+                        // Track last speech activity timestamp
+                        lastSpeechTimeRef.current = Date.now();
+
                         if (msg.type === "speechStarted") {
                             console.log("[STT] Speech started");
+                            // Clear silence timer — user is actively speaking
                             if (silenceTimerRef.current) {
                                 clearTimeout(silenceTimerRef.current);
                                 silenceTimerRef.current = null;
                             }
                         } else if (msg.type === "interim") {
                             setInterimText(msg.text);
+                            // Clear silence timer — user is still speaking
                             if (silenceTimerRef.current) {
                                 clearTimeout(silenceTimerRef.current);
                                 silenceTimerRef.current = null;
@@ -165,10 +171,30 @@ export function Interview() {
                             pendingFinalTextRef.current = pendingFinalTextRef.current
                                 ? pendingFinalTextRef.current + " " + text
                                 : text;
+                            // Reset silence timer — wait 7s of true silence before committing
                             if (silenceTimerRef.current) {
                                 clearTimeout(silenceTimerRef.current);
                             }
                             silenceTimerRef.current = setTimeout(() => {
+                                // Double-check: only commit if no speech activity in the last 7s
+                                const elapsed = Date.now() - lastSpeechTimeRef.current;
+                                if (elapsed < 6500) {
+                                    // Speech happened recently, don't commit yet
+                                    // Restart timer for remaining time
+                                    const remaining = 7000 - elapsed;
+                                    silenceTimerRef.current = setTimeout(() => {
+                                        const finalText = pendingFinalTextRef.current.trim();
+                                        if (!finalText) return;
+                                        setInterimText("");
+                                        console.log("[STT] Committed text:", finalText);
+                                        const entry = { type: "User" as const, message: finalText };
+                                        transcriptRef.current = [...transcriptRef.current, entry];
+                                        setTranscript((prev) => [...prev, entry]);
+                                        pendingFinalTextRef.current = "";
+                                        silenceTimerRef.current = null;
+                                    }, remaining);
+                                    return;
+                                }
                                 const finalText = pendingFinalTextRef.current.trim();
                                 if (!finalText) return;
                                 setInterimText("");
@@ -252,15 +278,22 @@ export function Interview() {
                     await new Promise<void>((resolve) => {
                         const check = () => {
                             if (cancelled) { resolve(); return; }
+                            // Don't respond while AI is already speaking
                             if (isRespondingRef.current) {
                                 setTimeout(check, 200);
+                                return;
+                            }
+                            // Don't respond while user is actively speaking or silence timer is running
+                            // (meaning we're still waiting for user to finish)
+                            if (silenceTimerRef.current !== null) {
+                                setTimeout(check, 200);
+                                return;
+                            }
+                            const userMsgs = transcriptRef.current.filter(m => m.type === "User");
+                            if (userMsgs.length > processedUserCountRef.current) {
+                                resolve();
                             } else {
-                                const userMsgs = transcriptRef.current.filter(m => m.type === "User");
-                                if (userMsgs.length > processedUserCountRef.current) {
-                                    resolve();
-                                } else {
-                                    setTimeout(check, 200);
-                                }
+                                setTimeout(check, 200);
                             }
                         };
                         check();
@@ -357,16 +390,11 @@ export function Interview() {
                 <span className="text-sm text-muted-foreground">AI Interview</span>
             </header>
 
-            <div className="flex flex-1 items-center justify-center px-6">
+            <div className="flex flex-1 items-center justify-center overflow-hidden px-6">
                 {error ? (
                     <div className="flex flex-col items-center gap-3 text-red-400">
                         <p className="text-sm">{error}</p>
                         <p className="text-xs text-muted-foreground">Check browser console for details</p>
-                    </div>
-                ) : statusMessage ? (
-                    <div className="flex flex-col items-center gap-3 text-muted-foreground">
-                        <Loader2 className="size-7 animate-spin" />
-                        <p className="text-sm">{statusMessage}</p>
                     </div>
                 ) : status === "connecting" ? (
                     <div className="flex flex-col items-center gap-3 text-muted-foreground">
@@ -375,6 +403,14 @@ export function Interview() {
                     </div>
                 ) : (
                     <div className="flex w-full max-w-3xl flex-col items-center gap-8">
+                        {/* Status indicator (shown inline, doesn't replace content) */}
+                        {statusMessage && (
+                            <div className="flex items-center gap-2 text-muted-foreground">
+                                <Loader2 className="size-4 animate-spin" />
+                                <p className="text-sm">{statusMessage}</p>
+                            </div>
+                        )}
+
                         {/* Conversation */}
                         <div className="flex w-full max-w-2xl flex-col gap-3 overflow-y-auto px-4" style={{ maxHeight: "50vh" }}>
                             {memoizedTranscript.map((m) => (
@@ -420,7 +456,7 @@ export function Interview() {
                 )}
             </div>
 
-            <footer className="flex justify-center px-6 py-8">
+            <footer className="flex shrink-0 justify-center px-6 py-8">
                 <Button
                     variant="destructive"
                     size="lg"

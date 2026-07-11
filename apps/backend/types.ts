@@ -1,7 +1,8 @@
 import z from "zod";
 
 export const PreInterviewBody = z.object({
-    github: z.string()
+    github: z.string().optional(),
+    resumeText: z.string().optional(),
 });
 
 export const ChatBody = z.object({
