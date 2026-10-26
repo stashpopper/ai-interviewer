@@ -13,6 +13,7 @@ app.use(express.json());
 app.use(cors({
     origin: [
         "https://llminterviewer.netlify.app",
+        "https://llminterviewer.netlify.app",
         "https://ai-interviewer-ky0h.onrender.com",
         "http://localhost:3000",
         "http://localhost:3001",
