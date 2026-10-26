@@ -137,7 +137,7 @@ app.post("/api/v1/chat", async (req, res) => {
                 "Content-Type": "application/json",
             },
             body: JSON.stringify({
-                model: process.env.MISTRAL_MODEL || "mistral-small-latest",
+                model: process.env.MISTRAL_MODEL || "labs-leanstral-1-5-1",
                 messages: [
                     {
                         role: "system",
@@ -160,15 +160,34 @@ ${JSON.stringify(cleanTranscript)}`
                     },
                     { role: "user", content: message },
                 ],
-                max_tokens: 200,
+                max_tokens: 300,
                 thinking: false,
         });
 
         const data = await resp.json();
-        let reply = data.choices?.[0]?.message?.content || "Could you elaborate on that?";
-        if (typeof reply !== "string") reply = JSON.stringify(reply);
-        // Remove thinking tokens if the model leaks them
-        reply = reply.replace(/<thinking>.*?<\/thinking>/g, "").replace(/\*\*/g, "").trim();
+        let rawContent = data.choices?.[0]?.message?.content;
+        let reply = "";
+        
+        // Handle structured content (thinking + text) from models like leanstral
+        if (Array.isArray(rawContent)) {
+            for (const block of rawContent) {
+                if (block.type === "text") {
+                    reply = block.text;
+                    break;
+                }
+            }
+            // If no text block found, fall back to stringifying the whole content
+            if (!reply) {
+                reply = JSON.stringify(rawContent);
+            }
+        } else if (typeof rawContent === "string") {
+            reply = rawContent;
+        } else {
+            reply = JSON.stringify(rawContent);
+        }
+        
+        // Clean the response: remove asterisks, trim
+        reply = reply.replace(/\*\*/g, "").trim();
         res.json({ reply });
     } catch (error) {
         console.error("Mistral error:", error);
