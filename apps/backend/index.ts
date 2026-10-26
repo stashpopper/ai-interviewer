@@ -119,6 +119,16 @@ app.post("/api/v1/chat", async (req, res) => {
         }
     }
 
+    // Clean transcript before sending to model — remove thinking/reasoning tokens
+    const cleanTranscript = (transcript || []).map((t: any) => {
+        if (typeof t.message === "string") return t;
+        const cleaned = { ...t };
+        if (cleaned.message?.text) cleaned.message.text = cleaned.message.text.replace(/<thinking>.*?<\/thinking>/g, "").replace(/\*\*/g, "").trim();
+        if (cleaned.thinking) delete cleaned.thinking;
+        if (cleaned.reasoning) delete cleaned.reasoning;
+        return cleaned;
+    });
+
     try {
         const resp = await fetch("https://api.mistral.ai/v1/chat/completions", {
             method: "POST",
@@ -127,7 +137,7 @@ app.post("/api/v1/chat", async (req, res) => {
                 "Content-Type": "application/json",
             },
             body: JSON.stringify({
-                model: process.env.MISTRAL_MODEL || "labs-leanstral-2603",
+                model: process.env.MISTRAL_MODEL || "mistral-small-latest",
                 messages: [
                     {
                         role: "system",
@@ -141,21 +151,25 @@ app.post("/api/v1/chat", async (req, res) => {
 - Do NOT use asterisks (*) for emphasis or formatting
 - Do NOT use any markdown formatting
 - Do NOT say "Got it" or "Nice" as standalone responses — always ask a question or give a follow-up
+- Do NOT output thinking tags, reasoning, or any analysis in your response — only output the spoken reply
 
 Candidate background:${backgroundContext}
 
 Current conversation context:
-${JSON.stringify(transcript || [])}`
+${JSON.stringify(cleanTranscript)}`
                     },
                     { role: "user", content: message },
                 ],
-                max_tokens: 150,
+                max_tokens: 200,
+            });
             }),
         });
 
         const data = await resp.json();
         let reply = data.choices?.[0]?.message?.content || "Could you elaborate on that?";
         if (typeof reply !== "string") reply = JSON.stringify(reply);
+        // Remove thinking tokens if the model leaks them
+        reply = reply.replace(/<thinking>.*?<\/thinking>/g, "").replace(/\*\*/g, "").trim();
         res.json({ reply });
     } catch (error) {
         console.error("Mistral error:", error);
