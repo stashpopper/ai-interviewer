@@ -134,8 +134,8 @@ export function Interview() {
                     }
                 };
 
-                // Connect to backend WebSocket for STT
-                const wsUrl = `${BACKEND_URL.replace("http", "ws")}/ws/stt?interviewId=${interviewId}`;
+                // Connect to backend WebSocket for STT (wss://)
+                const wsUrl = BACKEND_URL.replace("https", "wss") + "/ws/stt?interviewId=" + interviewId;
                 const ws = new WebSocket(wsUrl);
                 wsRef.current = ws;
 
