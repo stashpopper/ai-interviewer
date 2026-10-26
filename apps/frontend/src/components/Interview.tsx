@@ -263,6 +263,7 @@ export function Interview() {
                     interviewId,
                 });
                 let firstQuestion = firstResp.data.reply;
+                if (typeof firstQuestion !== "string") firstQuestion = JSON.stringify(firstQuestion);
                 firstQuestion = firstQuestion.replace(/\*/g, "").trim();
 
                 setStatusMessage("Speaking...");
@@ -311,6 +312,7 @@ export function Interview() {
                                     interviewId,
                                 });
                                 let aiText = resp.data.reply;
+                                if (typeof aiText !== "string") aiText = JSON.stringify(aiText);
                                 aiText = aiText.replace(/\*/g, "").trim();
                                 if (aiText && !cancelled) {
                                     setStatusMessage("Speaking...");

@@ -154,7 +154,8 @@ ${JSON.stringify(transcript || [])}`
         });
 
         const data = await resp.json();
-        const reply = data.choices?.[0]?.message?.content || "Could you elaborate on that?";
+        let reply = data.choices?.[0]?.message?.content || "Could you elaborate on that?";
+        if (typeof reply !== "string") reply = JSON.stringify(reply);
         res.json({ reply });
     } catch (error) {
         console.error("Mistral error:", error);
