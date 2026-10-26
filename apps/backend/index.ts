@@ -161,7 +161,6 @@ ${JSON.stringify(cleanTranscript)}`
                     { role: "user", content: message },
                 ],
                 max_tokens: 200,
-            });
             }),
         });
 
