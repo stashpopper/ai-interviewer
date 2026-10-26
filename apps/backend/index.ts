@@ -161,7 +161,7 @@ ${JSON.stringify(cleanTranscript)}`
                     { role: "user", content: message },
                 ],
                 max_tokens: 200,
-            }),
+                thinking: false,
         });
 
         const data = await resp.json();
