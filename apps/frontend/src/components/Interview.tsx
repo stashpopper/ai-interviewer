@@ -1,4 +1,5 @@
 import { BACKEND_URL, backendWebSocketOrigin } from "@/lib/config";
+import { normalizeChatReply } from "@/lib/replyText";
 import axios from "axios";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
@@ -262,8 +263,31 @@ export function Interview() {
                     transcript: [],
                     interviewId,
                 });
-                let firstQuestion = firstResp.data.reply;
-                firstQuestion = firstQuestion.replace(/\*/g, "").trim();
+                let firstQuestion = normalizeChatReply(firstResp.data.reply);
+                // #region agent log
+                fetch("http://127.0.0.1:7767/ingest/0f3cb5ec-1324-4061-a22c-e4706fc633ce", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9610a0" },
+                    body: JSON.stringify({
+                        sessionId: "9610a0",
+                        runId: "chat-fix",
+                        hypothesisId: "H1",
+                        location: "Interview.tsx:firstQuestion",
+                        message: "Normalized first question",
+                        data: {
+                            rawReplyType: Array.isArray(firstResp.data.reply)
+                                ? "array"
+                                : typeof firstResp.data.reply,
+                            firstQuestionLen: firstQuestion.length,
+                            preview: firstQuestion.slice(0, 120),
+                        },
+                        timestamp: Date.now(),
+                    }),
+                }).catch(() => {});
+                // #endregion
+                if (!firstQuestion) {
+                    throw new Error("Empty first question from chat API");
+                }
 
                 setStatusMessage("Speaking...");
                 await speak(firstQuestion);
@@ -310,8 +334,7 @@ export function Interview() {
                                     transcript: transcriptRef.current.slice(-6),
                                     interviewId,
                                 });
-                                let aiText = resp.data.reply;
-                                aiText = aiText.replace(/\*/g, "").trim();
+                                let aiText = normalizeChatReply(resp.data.reply);
                                 if (aiText && !cancelled) {
                                     setStatusMessage("Speaking...");
                                     await speak(aiText);

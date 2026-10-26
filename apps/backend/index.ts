@@ -7,6 +7,18 @@ import WebSocket from "ws";
 import multer from "multer";
 import { PDFParse } from "pdf-parse";
 import mammoth from "mammoth";
+import { appendFileSync } from "fs";
+import { extractAssistantReplyText, sanitizeInterviewerSpeech } from "./mistralReply";
+
+const DEBUG_LOG_PATH = "/home/hritam/Projects/ai-interviewer/.cursor/debug-9610a0.log";
+
+function agentLog(payload: Record<string, unknown>) {
+    try {
+        appendFileSync(DEBUG_LOG_PATH, `${JSON.stringify({ sessionId: "9610a0", timestamp: Date.now(), ...payload })}\n`);
+    } catch {
+        /* ignore */
+    }
+}
 
 const app = express();
 app.use(express.json());
@@ -140,12 +152,35 @@ ${JSON.stringify(transcript || [])}`
                     { role: "user", content: message },
                 ],
                 max_tokens: 150,
+                reasoning_effort: "none",
             }),
         });
 
         const data = await resp.json();
-        const reply = data.choices?.[0]?.message?.content || "Could you elaborate on that?";
-        res.json({ reply });
+        const rawContent = data.choices?.[0]?.message?.content;
+        const FALLBACK_REPLY =
+            "Could you walk me through a recent project from your GitHub and your role in it?";
+        let extracted = sanitizeInterviewerSpeech(extractAssistantReplyText(rawContent));
+        if (!extracted) {
+            extracted = FALLBACK_REPLY;
+        }
+        // #region agent log
+        agentLog({
+            runId: "chat-fix",
+            hypothesisId: "H1-H3",
+            location: "index.ts:/api/v1/chat",
+            message: "Mistral reply normalized",
+            data: {
+                contentType: Array.isArray(rawContent) ? "array" : typeof rawContent,
+                chunkTypes: Array.isArray(rawContent)
+                    ? rawContent.map((c: { type?: string }) => c?.type)
+                    : null,
+                extractedLen: extracted.length,
+                extractedPreview: extracted.slice(0, 120),
+            },
+        });
+        // #endregion
+        res.json({ reply: extracted });
     } catch (error) {
         console.error("Mistral error:", error);
         res.status(500).json({ reply: "I didn't catch that, could you repeat?" });
