@@ -126,7 +126,7 @@ ai-interviewer/
 Create a `.env` file in `apps/backend/`:
 
 ```env
-MISTRAL_API_KEY=00635ea07a4ac5bdc21b70b8ea839e37de25616c
+MISTRAL_API_KEY=your-mistral-key
 DEEPGRAM_API_KEY=your-deepgram-key
 ```
 
