@@ -1,4 +1,4 @@
 
-// Bun-specific: import.meta.env works in both server and browser contexts
-export const BACKEND_URL = (typeof import.meta !== "undefined" && import.meta.env?.VITE_BACKEND_URL) || "http://localhost:3001";
-export const GEMINI_API_KEY = (typeof process !== "undefined" && process.env?.GEMINI_API_KEY) || import.meta.env?.GEMINI_API_KEY || "";
+// Set via Bun build --define at build time
+export const BACKEND_URL = (typeof globalThis !== "undefined" && globalThis.__BACKEND_URL__) || "http://localhost:3001";
+export const GEMINI_API_KEY = (typeof globalThis !== "undefined" && globalThis.__GEMINI_API_KEY__) || "";
