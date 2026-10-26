@@ -25,6 +25,21 @@ export function Form() {
         }
 
         setLoading(true);
+        // #region agent log
+        fetch("http://127.0.0.1:7767/ingest/0f3cb5ec-1324-4061-a22c-e4706fc633ce", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "9610a0" },
+            body: JSON.stringify({
+                sessionId: "9610a0",
+                runId: "pre-fix",
+                hypothesisId: "H1",
+                location: "Form.tsx:onSubmit",
+                message: "pre-interview request URL",
+                data: { backendUrl: BACKEND_URL, path: "/api/v1/pre-interview" },
+                timestamp: Date.now(),
+            }),
+        }).catch(() => {});
+        // #endregion
         try {
             let response;
 

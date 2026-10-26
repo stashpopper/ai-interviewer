@@ -131,6 +131,9 @@ const result = await Bun.build({
   sourcemap: "linked",
   define: {
     "process.env.NODE_ENV": JSON.stringify("production"),
+    "globalThis.__BACKEND_URL__": JSON.stringify(
+      process.env.VITE_BACKEND_URL || process.env.BACKEND_URL || "",
+    ),
   },
   ...cliConfig,
 });

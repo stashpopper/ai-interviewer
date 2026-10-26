@@ -28,6 +28,7 @@ COPY apps/frontend/src/ apps/frontend/src/
 # Build frontend with backend URL injected at build time
 ARG BACKEND_URL=https://ai-interviewer-ky0h.onrender.com
 ENV BACKEND_URL=${BACKEND_URL}
+ENV VITE_BACKEND_URL=${BACKEND_URL}
 
 WORKDIR /app/apps/frontend
 RUN bun run build.ts --outdir=dist

@@ -1,3 +1,7 @@
+[build]
+  command = "bun run build"
+  publish = "dist"
+
 [build.environment]
   VITE_BACKEND_URL = "https://ai-interviewer-ky0h.onrender.com"
 

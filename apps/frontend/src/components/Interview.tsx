@@ -1,4 +1,4 @@
-import { BACKEND_URL } from "@/lib/config";
+import { BACKEND_URL, backendWebSocketOrigin } from "@/lib/config";
 import axios from "axios";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
@@ -135,7 +135,7 @@ export function Interview() {
                 };
 
                 // Connect to backend WebSocket for STT
-                const wsUrl = `${BACKEND_URL.replace("http", "ws")}/ws/stt?interviewId=${interviewId}`;
+                const wsUrl = `${backendWebSocketOrigin()}/ws/stt?interviewId=${interviewId}`;
                 const ws = new WebSocket(wsUrl);
                 wsRef.current = ws;
 
