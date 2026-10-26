@@ -10,7 +10,16 @@ import mammoth from "mammoth";
 
 const app = express();
 app.use(express.json());
-app.use(cors());
+app.use(cors({
+    origin: [
+        "https://llminterviewer.netlify.app",
+        "https://ai-interviewer-ky0h.onrender.com",
+        "http://localhost:3000",
+        "http://localhost:3001",
+    ],
+    methods: ["GET", "POST", "OPTIONS"],
+    credentials: true,
+}));
 
 // In-memory store for interview context (github data + resume)
 const interviewContext = new Map<string, { githubUsername?: string; githubData?: Array<{ description?: string; name: string; fullName: string; starCount?: number }>; resumeText?: string }>();
