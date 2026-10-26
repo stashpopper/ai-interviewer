@@ -10,17 +10,7 @@ import mammoth from "mammoth";
 
 const app = express();
 app.use(express.json());
-app.use(cors({
-    origin: [
-        "https://llminterviewer.netlify.app",
-        "https://llminterviewer.netlify.app",
-        "https://ai-interviewer-ky0h.onrender.com",
-        "http://localhost:3000",
-        "http://localhost:3001",
-    ],
-    methods: ["GET", "POST", "OPTIONS"],
-    credentials: true,
-}));
+app.use(cors());
 
 // In-memory store for interview context (github data + resume)
 const interviewContext = new Map<string, { githubUsername?: string; githubData?: Array<{ description?: string; name: string; fullName: string; starCount?: number }>; resumeText?: string }>();
@@ -119,16 +109,6 @@ app.post("/api/v1/chat", async (req, res) => {
         }
     }
 
-    // Clean transcript before sending to model — remove thinking/reasoning tokens
-    const cleanTranscript = (transcript || []).map((t: any) => {
-        if (typeof t.message === "string") return t;
-        const cleaned = { ...t };
-        if (cleaned.message?.text) cleaned.message.text = cleaned.message.text.replace(/<thinking>.*?<\/thinking>/g, "").replace(/\*\*/g, "").trim();
-        if (cleaned.thinking) delete cleaned.thinking;
-        if (cleaned.reasoning) delete cleaned.reasoning;
-        return cleaned;
-    });
-
     try {
         const resp = await fetch("https://api.mistral.ai/v1/chat/completions", {
             method: "POST",
@@ -137,7 +117,7 @@ app.post("/api/v1/chat", async (req, res) => {
                 "Content-Type": "application/json",
             },
             body: JSON.stringify({
-                model: process.env.MISTRAL_MODEL || "labs-leanstral-1-5-1",
+                model: process.env.MISTRAL_MODEL || "labs-leanstral-2603",
                 messages: [
                     {
                         role: "system",
@@ -151,43 +131,20 @@ app.post("/api/v1/chat", async (req, res) => {
 - Do NOT use asterisks (*) for emphasis or formatting
 - Do NOT use any markdown formatting
 - Do NOT say "Got it" or "Nice" as standalone responses — always ask a question or give a follow-up
-- Do NOT output thinking tags, reasoning, or any analysis in your response — only output the spoken reply
 
 Candidate background:${backgroundContext}
 
 Current conversation context:
-${JSON.stringify(cleanTranscript)}`
+${JSON.stringify(transcript || [])}`
                     },
                     { role: "user", content: message },
                 ],
-                max_tokens: 300,
-                thinking: false,
+                max_tokens: 150,
+            }),
         });
 
         const data = await resp.json();
-        let rawContent = data.choices?.[0]?.message?.content;
-        let reply = "";
-        
-        // Handle structured content (thinking + text) from models like leanstral
-        if (Array.isArray(rawContent)) {
-            for (const block of rawContent) {
-                if (block.type === "text") {
-                    reply = block.text;
-                    break;
-                }
-            }
-            // If no text block found, fall back to stringifying the whole content
-            if (!reply) {
-                reply = JSON.stringify(rawContent);
-            }
-        } else if (typeof rawContent === "string") {
-            reply = rawContent;
-        } else {
-            reply = JSON.stringify(rawContent);
-        }
-        
-        // Clean the response: remove asterisks, trim
-        reply = reply.replace(/\*\*/g, "").trim();
+        const reply = data.choices?.[0]?.message?.content || "Could you elaborate on that?";
         res.json({ reply });
     } catch (error) {
         console.error("Mistral error:", error);
@@ -223,14 +180,8 @@ app.post("/api/v1/evaluate", async (req, res) => {
     }
 });
 
-// --- Health check (for uptime monitors like Better Uptime) ---
-app.get("/api/health", (_req, res) => {
-    res.json({ status: "ok", timestamp: new Date().toISOString() });
-});
-
-const PORT = parseInt(process.env.PORT || "3001", 10);
-const server = app.listen(PORT, () => {
-    console.log(`Backend running on port ${PORT}`);
+const server = app.listen(3001, () => {
+    console.log("Backend running on port 3001");
 });
 
 const wsServer = new WebSocket.Server({ server, path: "/ws/stt" });

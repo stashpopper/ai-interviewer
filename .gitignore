@@ -24,6 +24,7 @@ coverage/
 .next/
 out/
 build/
+dist/
 
 # Bun
 bun.lockb

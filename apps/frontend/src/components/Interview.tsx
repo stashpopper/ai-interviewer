@@ -134,8 +134,8 @@ export function Interview() {
                     }
                 };
 
-                // Connect to backend WebSocket for STT (wss://)
-                const wsUrl = BACKEND_URL.replace("https", "wss") + "/ws/stt?interviewId=" + interviewId;
+                // Connect to backend WebSocket for STT
+                const wsUrl = `${BACKEND_URL.replace("http", "ws")}/ws/stt?interviewId=${interviewId}`;
                 const ws = new WebSocket(wsUrl);
                 wsRef.current = ws;
 
@@ -263,7 +263,6 @@ export function Interview() {
                     interviewId,
                 });
                 let firstQuestion = firstResp.data.reply;
-                if (typeof firstQuestion !== "string") firstQuestion = JSON.stringify(firstQuestion);
                 firstQuestion = firstQuestion.replace(/\*/g, "").trim();
 
                 setStatusMessage("Speaking...");
@@ -312,7 +311,6 @@ export function Interview() {
                                     interviewId,
                                 });
                                 let aiText = resp.data.reply;
-                                if (typeof aiText !== "string") aiText = JSON.stringify(aiText);
                                 aiText = aiText.replace(/\*/g, "").trim();
                                 if (aiText && !cancelled) {
                                     setStatusMessage("Speaking...");
