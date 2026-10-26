@@ -195,8 +195,9 @@ app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-const server = app.listen(3001, () => {
-    console.log("Backend running on port 3001");
+const PORT = parseInt(process.env.PORT || "3001", 10);
+const server = app.listen(PORT, () => {
+    console.log(`Backend running on port ${PORT}`);
 });
 
 const wsServer = new WebSocket.Server({ server, path: "/ws/stt" });
