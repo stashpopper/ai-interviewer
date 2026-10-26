@@ -189,6 +189,11 @@ app.post("/api/v1/evaluate", async (req, res) => {
     }
 });
 
+// --- Health check (for uptime monitors like Better Uptime) ---
+app.get("/api/health", (_req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
 const server = app.listen(3001, () => {
     console.log("Backend running on port 3001");
 });
