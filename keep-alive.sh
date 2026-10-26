@@ -7,7 +7,7 @@
 set -euo pipefail
 
 BACKEND_URL="${1:?Usage: $0 <backend-url> [interval-seconds]}"
-INTERVAL="${2:-300}"  # default: 5 minutes
+INTERVAL="${2:-240}"  # default: 4 minutes
 
 while true; do
     echo "$(date '+%Y-%m-%d %H:%M:%S') — Pinging $BACKEND_URL ..."
