@@ -215,6 +215,11 @@ app.post("/api/v1/evaluate", async (req, res) => {
     }
 });
 
+// --- Keep-alive route (prevents Render cold starts) ---
+app.get("/keep-alive", (_req, res) => {
+    res.json({ status: "ok", timestamp: Date.now() });
+});
+
 const server = app.listen(3001, () => {
     console.log("Backend running on port 3001");
 });
